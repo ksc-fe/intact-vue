@@ -1,12 +1,12 @@
-import Intact from 'intact/dist/intact';
+import Intact from 'intact/dist';
 import Vue from 'vue';
 
 const h = Intact.Vdt.miss.h;
 const patch = Vue.prototype.__patch__;
-const {get, set} = Intact.utils;
+const {get, set, extend, isArray, create} = Intact.utils;
 
 export function normalizeChildren(vNodes) {
-    if (Array.isArray(vNodes)) {
+    if (isArray(vNodes)) {
         const ret = [];
         vNodes.forEach(vNode => {
             ret.push(normalize(vNode));
@@ -50,7 +50,22 @@ export function normalizeProps(vNode) {
         for (const key in attrs) {
             if (~['staticClass', 'class', 'style', 'staticStyle'].indexOf(key)) continue;
             let value = attrs[key];
-            if (propTypes && propTypes[key] === Boolean && value === '') {
+            let tmp;
+            if (propTypes && 
+                (
+                    // value is Boolean
+                    (tmp = propTypes[key]) === Boolean ||
+                    tmp && (
+                        // value contains Boolean
+                        isArray(tmp) && tmp.indexOf(Boolean) > -1 || 
+                        // value.type is Boolean
+                        tmp.type === Boolean ||
+                        // value.type contains Boolean
+                        isArray(tmp.type) && tmp.type.indexOf(Boolean) > -1
+                    )
+                ) && 
+                (value === '' || value === key)
+            ) {
                 value = true;
             }
             props[key] = value; 
@@ -58,35 +73,55 @@ export function normalizeProps(vNode) {
     }
 
     // add className
-    props.className = handleClassName(vNode);
+    const className = handleClassName(vNode);
+    if (className !== undefined) {
+        props.className = className;
+    }
     // add style
-    props.style = handleStyle(vNode);
+    const style = handleStyle(vNode);
+    if (style !== undefined) {
+        props.style = style;
+    }
 
     // add key
     if (vNode.key) {
         props.key = vNode.key;
+    } else if (data.key) {
+        props.key = data.key;
     }
 
     // if exists scoped slots
     const scopedSlots = data.scopedSlots;
     if (scopedSlots) {
+        const blocks = props._blocks ? props._blocks : (props._blocks = {});
         for (const key in scopedSlots) {
-            props[key] = function() {
-                return normalizeChildren(scopedSlots[key].apply(this, arguments));
+            blocks[key] = function(parent, ...args) {
+                return normalizeChildren(scopedSlots[key].apply(this, args));
             };
         }
     }
 
     // if exists v-model
-    if (data.model) {
-        props.value = data.model.value;
-    } else if (data.directives) {
-        // for vue@2.1.8
+    const model = data.model;
+    if (model) {
+        props.value = model.value;
+        props['v-model'] = model.expression;
+    }
+    if (data.directives) {
         const directives = data.directives;
         for (let i = 0; i < directives.length; i++) {
-            if (directives[i].name === 'model') {
-                props.value = directives[i].value;
+            const model =  directives[i];
+            if (model.name === 'model') {
+                // for vue@2.1.8
+                props.value = model.value;
+                props['v-model'] = model.expression;
                 break;
+            } else if (model.name === 'show' && !model.value) {
+                if (props.style) {
+                    props.style.display = 'none';
+                } else {
+                    props.style = {display: 'none'}
+                }
             }
         }
     }
@@ -94,14 +129,29 @@ export function normalizeProps(vNode) {
     // convert ref string to function
     handleRef(vNode, props);
 
-    for (let key in componentOptions.listeners) {
-        // is a v-model directive of vue
-        if (key === 'input') {
-            props[`ev-$change:value`] = function(c, v) {
-                componentOptions.listeners.input(v);
+    const listeners = componentOptions.listeners;
+    if (listeners) {
+        for (let key in listeners) {
+            let _cb = listeners[key];
+            let cb = _cb;
+
+            if (key === 'input') {
+                // is a v-model directive of vue
+                key = `$change:value`;
+                cb = (c, v) => _cb(v);
+            } else if (key.substr(0, 7) === 'update:') {
+                // delegate update:prop(sync modifier) to $change:prop
+                key = `$change:${key.substr(7)}`;
+                cb = (c, v) => _cb(v);
             }
-        } else {
-            props[`ev-${key}`] = componentOptions.listeners[key];
+
+            // if there is a $change:prop originally, set it as array
+            const name = `ev-${key}`;
+            if (props[name]) {
+                props[name] = [props[name], cb]
+            } else {
+                props[name] = cb;
+            }
         }
     }
 
@@ -112,12 +162,32 @@ export function normalizeProps(vNode) {
     // In this case, we should merge them 
     props.children = children;
     if (props._blocks) {
-        Object.assign(props._blocks, _blocks);
+        extend(props._blocks, _blocks);
     } else {
         props._blocks = _blocks;
     }
 
+    normalizeContext(vNode, props);
+
     return props;
+}
+
+function normalizeContext(vNode, props) {
+    const $data = vNode.context.$data;
+    props._context = {
+        data: {
+            get(name) {
+                if (name != null) {
+                    return get($data, name);
+                } else {
+                    return $data;
+                }
+            },
+            set(name, value) {
+                set($data, name, value);
+            }
+        }
+    };
 }
 
 export function getChildrenAndBlocks(slots) {
@@ -146,43 +216,31 @@ export function functionalWrapper(Component) {
     Ctor.options = {
         functional: true,
         render(h, props) {
-            const data = props.parent.$data;
-            const _props = {
-                // children: props.children,
-                _context: {
-                    data: {
-                        get(name) {
-                            if (name != null) {
-                                return get(data, name);
-                            } else {
-                                return data;
-                            }
-                        },
-                        set(name, value) {
-                            set(data, name, value);
-                        }
-                    }
+            const _props = normalizeProps({
+                // fake
+                componentOptions: {
+                    Ctor: Component,
+                    listeners: props.listeners,
                 },
-                ...normalizeProps({
-                    // fake
-                    componentOptions: {
-                        Ctor: Component,
-                        listeners: props.listeners,
-                    },
-                    data: props.data,
-                    slots: props.slots(),
-                })
-            };
+                data: props.data,
+                slots: props.slots(),
+                context: {
+                    $data: props.parent.$data,
+                },
+            });
             const vNode = Component(_props, true /* is in vue */);
-            if (Array.isArray(vNode)) {
+            if (isArray(vNode)) {
                 throw new Error('Array children does not be supported.');
             }
 
             const attrs = {};
             const __props = {attrs};
             for (const key in vNode.props) {
-                if (~['children', '_context', 'className', 'style'].indexOf(key)) continue;
+                if (~['children', '_context', 'className', 'style', 'ref', 'key'].indexOf(key)) continue;
                 attrs[key] = vNode.props[key];
+            }
+            if (props.data.ref) {
+                __props.ref = props.data.ref;
             }
             if (vNode.props.className) {
                 __props.staticClass = vNode.props.className;
@@ -190,6 +248,7 @@ export function functionalWrapper(Component) {
             if (vNode.props.style) {
                 __props.staticStyle = vNode.props.style;
             }
+            __props.key = vNode.props.key;
 
             return h(
                 vNode.tag,
@@ -253,7 +312,7 @@ function handleRef(vNode, props) {
             if (i) {
                 ref = i;
                 if (vNode.data.refInFor) {
-                    if (!Array.isArray(refs)) {
+                    if (!isArray(refs[key])) {
                         refs[key] = [ref];
                     } else if (refs[key].indexOf(ref) < 0) {
                         refs[key].push(ref);
@@ -262,7 +321,7 @@ function handleRef(vNode, props) {
                     refs[key] = ref; 
                 }
             } else {
-                if (Array.isArray(refs[key])) {
+                if (isArray(refs[key])) {
                     var index = refs[key].indexOf(ref);
                     if (~index) {
                         refs[key].splice(index, 1);
@@ -296,7 +355,7 @@ function handleClassName(vNode) {
 
 function stringifyClass(className) {
     if (className == null) return '';
-    if (Array.isArray(className)) {
+    if (isArray(className)) {
         return stringifyArray(className);
     }
     if (typeof className === 'object') {
@@ -340,7 +399,7 @@ function handleStyle(vNode) {
     if (data) {
         style = getStyleBinding(data.style);
         if (data.staticStyle) {
-            return Object.assign(data.staticStyle, style);
+            return extend(data.staticStyle, style);
         }
     }
 
@@ -350,7 +409,7 @@ function handleStyle(vNode) {
 function getStyleBinding(style) {
     if (!style) return style;
 
-    if (Array.isArray(style)) {
+    if (isArray(style)) {
         return toObject(style);
     }
     if (typeof style === 'string') {
@@ -364,7 +423,7 @@ function toObject(arr) {
     const res = {};
     for (let i = 0; i < arr.length; i++) {
         if (arr[i]) {
-            Object.assign(res, arr[i]);
+            extend(res, arr[i]);
         }
     }
 
@@ -372,7 +431,7 @@ function toObject(arr) {
 }
 
 
-const cache = Object.create(null);
+const cache = create(null);
 function parseStyleText(cssText) {
     const hit = cache[cssText];
     if (hit) return hit;

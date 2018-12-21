@@ -1,11 +1,9 @@
-(function (global, factory) {
-	typeof exports === 'object' && typeof module !== 'undefined' ? module.exports = factory(require('vue'), require('intact/dist')) :
-	typeof define === 'function' && define.amd ? define(['vue', 'intact/dist'], factory) :
-	(global.Intact = factory(global.Vue,global.Intact));
-}(this, (function (Vue,Intact) { 'use strict';
+'use strict';
 
-Vue = Vue && Vue.hasOwnProperty('default') ? Vue['default'] : Vue;
-Intact = Intact && Intact.hasOwnProperty('default') ? Intact['default'] : Intact;
+function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
+
+var Vue = _interopDefault(require('vue'));
+var Intact = _interopDefault(require('intact/dist'));
 
 var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) {
   return typeof obj;
@@ -827,6 +825,4 @@ if (!Object.setPrototypeOf) {
     }
 }
 
-return IntactVue;
-
-})));
+module.exports = IntactVue;
